@@ -563,8 +563,10 @@ impl Database {
                     fee_amount_per_gas_unit,
                     fee_token,
                     gas_limit_multiplier,
+                    code_type,
                     code,
                     data,
+                    memo,
                     return_code
                 )",
             network
@@ -582,7 +584,9 @@ impl Database {
         for t in txs.iter() {
             let tx = Tx::try_from(t.as_slice()).map_err(|e| Error::InvalidTxData(e.to_string()))?;
 
-            let mut code = Default::default();
+            let mut code: [u8; 32] = Default::default();
+            let mut code_type: String = "unknown".to_string();
+
             let mut txid_wrapper: Vec<u8> = vec![];
             let mut hash_id = tx.header_hash().to_vec();
             let mut data_json: serde_json::Value = json!(null);
@@ -615,7 +619,7 @@ impl Database {
                 }
 
                 // look for wrapper tx to link to
-                let txs = query(&format!("SELECT * FROM {0}.transactions WHERE block_id IN (SELECT block_id FROM {0}.blocks WHERE header_height = {1});", network, block_height-1))
+                let txs: Vec<Row> = query(&format!("SELECT * FROM {0}.transactions WHERE block_id IN (SELECT block_id FROM {0}.blocks WHERE header_height = {1});", network, block_height-1))
                     .fetch_all(&mut *sqlx_tx)
                     .await?;
                 txid_wrapper = txs[i].try_get("hash")?;
@@ -630,6 +634,7 @@ impl Database {
                 let code_hex = hex::encode(code.as_slice());
                 let unknown_type = "unknown".to_string();
                 let type_tx = checksums_map.get(&code_hex).unwrap_or(&unknown_type);
+                code_type = type_tx.to_string();
 
                 // decode tx_transfer, tx_bond and tx_unbound to store the decoded data in their tables
                 // if the transaction has failed don't try to decode because the changes are not included and the data might not be correct
@@ -778,8 +783,10 @@ impl Database {
                 fee_amount_per_gas_unit,
                 fee_token,
                 gas_limit_multiplier,
+                code_type,
                 code,
                 data_json,
+                tx.memo().map(|v| v.to_vec()),
                 return_code,
             ));
         }
@@ -802,8 +809,10 @@ impl Database {
                     fee_amount_per_gas_unit,
                     fee_token,
                     fee_gas_limit_multiplier,
+                    code_type,
                     code,
                     data,
+                    memo,
                     return_code,
                 )| {
                     b.push_bind(hash)
@@ -813,8 +822,10 @@ impl Database {
                         .push_bind(fee_amount_per_gas_unit)
                         .push_bind(fee_token)
                         .push_bind(fee_gas_limit_multiplier)
+                        .push_bind(code_type)
                         .push_bind(code)
                         .push_bind(data)
+                        .push_bind(memo)
                         .push_bind(return_code);
                 },
             )

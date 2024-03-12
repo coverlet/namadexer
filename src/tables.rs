@@ -75,3 +75,13 @@ pub fn get_create_commit_signatures_table_query(network: &str) -> String {
         network
     )
 }
+
+pub fn get_create_address_tx_table_query(network: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {}.address_tx (
+        address TEXT,
+        tx_id BYTEA NOT NULL
+    );",
+        network
+    )
+}

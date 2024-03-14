@@ -31,7 +31,6 @@ use sqlx::postgres::{PgPool, PgPoolOptions, PgRow as Row};
 use sqlx::Row as TRow;
 use sqlx::{query, QueryBuilder, Transaction};
 use std::collections::HashMap;
-use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 use tendermint::block::Block;
@@ -801,7 +800,6 @@ impl Database {
                 gas_limit_multiplier = Some(multiplier as i64);
             }
 
-            dbg!(&signer);
             tx_values.push((
                 hash_id,
                 block_id.to_vec(),

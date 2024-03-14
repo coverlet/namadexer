@@ -34,9 +34,8 @@ pub fn get_create_transactions_table_query(network: &str) -> String {
         "CREATE TABLE IF NOT EXISTS {}.transactions (
         hash BYTEA NOT NULL,
         block_id BYTEA NOT NULL,
-        block_height INTEGER,
         signer TEXT,
-        tsender TEXT,
+        treceiver TEXT,
         tx_type TEXT NOT NULL,
         wrapper_id BYTEA,
         fee_amount_per_gas_unit TEXT,

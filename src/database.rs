@@ -560,9 +560,8 @@ impl Database {
             "INSERT INTO {}.transactions(
                     hash, 
                     block_id, 
-                    block_height,
                     signer,
-                    tsender,
+                    treceiver,
                     tx_type,
                     wrapper_id,
                     fee_amount_per_gas_unit,
@@ -598,7 +597,7 @@ impl Database {
             let mut return_code: Option<i32> = None;
 
             let mut signer: Option<Address> = None;
-            let mut tsender: Option<Address> = None;
+            let mut treceiver: Option<Address> = None;
 
             // Decrypted transaction give access to the raw data
             if let TxType::Decrypted(..) = tx.header().tx_type {
@@ -670,10 +669,7 @@ impl Database {
                     match type_tx.as_str() {
                         "tx_transfer" => {
                             let transfer = token::Transfer::try_from_slice(&data[..])?;
-
-                            // addresses_tx
-                            //     .push((transfer.target.to_string(), tx.header_hash().to_vec()));
-                            tsender = Some(transfer.target.clone());
+                            treceiver = Some(transfer.target.clone());
                             data_json = serde_json::to_value(transfer)?;
                         }
                         "tx_bond" => {
@@ -803,9 +799,8 @@ impl Database {
             tx_values.push((
                 hash_id,
                 block_id.to_vec(),
-                block_height,
                 signer.as_ref().map(|s| s.to_string()),
-                tsender.as_ref().map(|s| s.to_string()),
+                treceiver.as_ref().map(|s| s.to_string()),
                 utils::tx_type_name(&tx.header.tx_type),
                 txid_wrapper,
                 fee_amount_per_gas_unit,
@@ -832,9 +827,8 @@ impl Database {
                  (
                     hash,
                     block_id,
-                    block_height,
                     signer,
-                    tsender,
+                    treceiver,
                     tx_type,
                     wrapper_id,
                     fee_amount_per_gas_unit,
@@ -848,9 +842,8 @@ impl Database {
                 )| {
                     b.push_bind(hash)
                         .push_bind(block_id)
-                        .push_bind(block_height as i64)
                         .push_bind(signer)
-                        .push_bind(tsender)
+                        .push_bind(treceiver)
                         .push_bind(tx_type)
                         .push_bind(wrapper_id)
                         .push_bind(fee_amount_per_gas_unit)

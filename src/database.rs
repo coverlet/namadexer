@@ -1,5 +1,6 @@
 use crate::queries::insert_block_query;
 use crate::{config::DatabaseConfig, error::Error, utils};
+use namada_sdk::tx::{Section, Signer};
 use serde_json::json;
 
 use namada_sdk::types::key::common::PublicKey;
@@ -27,9 +28,10 @@ use namada_sdk::{
     },
 };
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow as Row};
+use sqlx::Row as TRow;
 use sqlx::{query, QueryBuilder, Transaction};
-use sqlx::{Execute, Row as TRow};
 use std::collections::HashMap;
+use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 use tendermint::block::Block;
@@ -44,7 +46,7 @@ use crate::{
 };
 
 use crate::tables::{
-    get_create_address_tx_table_query, get_create_block_table_query,
+    get_create_block_table_query,
     get_create_commit_signatures_table_query, get_create_evidences_table_query,
     get_create_transactions_table_query,
 };
@@ -141,10 +143,6 @@ impl Database {
             .await?;
 
         query(get_create_evidences_table_query(&self.network).as_str())
-            .execute(&*self.pool)
-            .await?;
-
-        query(get_create_address_tx_table_query(&self.network).as_str())
             .execute(&*self.pool)
             .await?;
 
@@ -563,6 +561,9 @@ impl Database {
             "INSERT INTO {}.transactions(
                     hash, 
                     block_id, 
+                    block_height,
+                    signer,
+                    tsender,
                     tx_type,
                     wrapper_id,
                     fee_amount_per_gas_unit,
@@ -577,15 +578,6 @@ impl Database {
             network
         ));
 
-        let mut address_tx_query_builder: QueryBuilder<sqlx::Postgres> =
-            QueryBuilder::new(format!(
-                "INSERT INTO {}.address_tx(
-                    address, 
-                    tx_id
-                )",
-                network
-            ));
-
         // this will holds tuples (hash, block_id, tx_type, fee_amount_per_gas_unit, fee_token, gas_limit_multiplier, code, data)
         // in order to push txs.len at once in a single query.
         // the limit for bind values in postgres is 65535 values, that means that
@@ -593,8 +585,6 @@ impl Database {
         // n_tx = 65535/8 = 8191
         // being 8 the number of columns.
         let mut tx_values = Vec::with_capacity(txs.len());
-
-        let mut addresses_tx: Vec<(String, Vec<u8>)> = Vec::new();
 
         let mut i: usize = 0;
         for t in txs.iter() {
@@ -607,6 +597,9 @@ impl Database {
             let mut hash_id = tx.header_hash().to_vec();
             let mut data_json: serde_json::Value = json!(null);
             let mut return_code: Option<i32> = None;
+
+            let mut signer: Option<Address> = None;
+            let mut tsender: Option<Address> = None;
 
             // Decrypted transaction give access to the raw data
             if let TxType::Decrypted(..) = tx.header().tx_type {
@@ -659,8 +652,19 @@ impl Database {
                         .data()
                         .ok_or(Error::InvalidTxData("tx has no data".into()))?;
 
-                    dbg!(type_tx.as_str());
-
+                    for tx_section in tx.sections.iter() {
+                        match tx_section {
+                            Section::Signature(signature) => {
+                                match &signature.signer {
+                                    Signer::Address(address) => {
+                                        signer = Some(address.clone());
+                                    }
+                                    _ => {} 
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     info!("Saving {} transaction", type_tx);
 
                     // decode tx_transfer, tx_bond and tx_unbound to store the decoded data in their tables
@@ -668,35 +672,17 @@ impl Database {
                         "tx_transfer" => {
                             let transfer = token::Transfer::try_from_slice(&data[..])?;
 
-                            addresses_tx.push((
-                                transfer.source.to_string(),
-                                tx.header_hash().to_vec(),
-                            ));
-                            addresses_tx.push((
-                                transfer.target.to_string(),
-                                tx.header_hash().to_vec(),
-                            ));
-
+                            // addresses_tx
+                            //     .push((transfer.target.to_string(), tx.header_hash().to_vec()));
+                            tsender = Some(transfer.target.clone());
                             data_json = serde_json::to_value(transfer)?;
                         }
                         "tx_bond" => {
                             let bond = Bond::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                bond.source.as_ref().unwrap_or(&bond.validator).to_string(),
-                                tx.header_hash().to_vec(),
-                            ));
-
                             data_json = serde_json::to_value(bond)?;
                         }
                         "tx_unbond" => {
                             let unbond = Unbond::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                unbond.source.as_ref().unwrap_or(&unbond.validator).to_string(),
-                                tx.header_hash().to_vec(),
-                            ));
-
                             data_json = serde_json::to_value(unbond)?;
                         }
                         // this is an ethereum transaction
@@ -707,12 +693,6 @@ impl Database {
                         }
                         "tx_vote_proposal" => {
                             let tx_vote_proposal = VoteProposalData::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_vote_proposal.voter.to_string(),
-                                tx.header_hash().to_vec(),
-                            ));
-
                             data_json = serde_json::to_value(tx_vote_proposal)?;
                         }
                         "tx_reveal_pk" => {
@@ -726,12 +706,6 @@ impl Database {
                             // Not much to do, just, check that the address this transactions
                             // holds in the data field is correct, or at least parsed succesfully.
                             let tx_resign_steward = Address::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_resign_steward.to_string(),
-                                tx.header_hash().to_vec(),
-                            ));
-
                             data_json = serde_json::to_value(tx_resign_steward)?;
                         }
                         "tx_update_steward_commission" => {
@@ -739,12 +713,6 @@ impl Database {
                             // holds in the data field is correct, or at least parsed succesfully.
                             let tx_update_steward_commission =
                                 UpdateStewardCommission::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_update_steward_commission.steward.to_string(),
-                                tx.header_hash().to_vec(),
-                            ));    
-
                             data_json = serde_json::to_value(tx_update_steward_commission)?;
                         }
                         "tx_init_account" => {
@@ -761,12 +729,6 @@ impl Database {
                             // check that transaction can be parsed
                             // before storing it into database
                             let tx_update_account = UpdateAccount::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_update_account.addr.to_string(),
-                                tx.header_hash().to_vec(),
-                            )); 
-
                             data_json = serde_json::to_value(tx_update_account)?;
                         }
                         "tx_ibc" => {
@@ -776,114 +738,49 @@ impl Database {
                         "tx_become_validator" => {
                             let tx_become_validator = BecomeValidator::try_from_slice(&data[..])?;
 
-                            addresses_tx.push((
-                                tx_become_validator.address.to_string(),
-                                tx.header_hash().to_vec(),
-                            )); 
-
                             data_json = serde_json::to_value(tx_become_validator)?;
                         }
                         "tx_change_consensus_key" => {
                             let tx_change_consensus_key =
                                 ConsensusKeyChange::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_change_consensus_key.validator.to_string(),
-                                tx.header_hash().to_vec(),
-                            )); 
-
                             data_json = serde_json::to_value(tx_change_consensus_key)?;
                         }
                         "tx_change_validator_commission" => {
                             let tx_change_validator_commission =
                                 CommissionChange::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_change_validator_commission.validator.to_string(),
-                                tx.header_hash().to_vec(),
-                            ));     
-
                             data_json = serde_json::to_value(tx_change_validator_commission)?;
                         }
                         "tx_change_validator_metadata" => {
                             let tx_change_validator_metadata =
                                 MetaDataChange::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_change_validator_metadata.validator.to_string(),
-                                tx.header_hash().to_vec(),
-                            ));     
-
                             data_json = serde_json::to_value(tx_change_validator_metadata)?;
                         }
                         "tx_claim_rewards" => {
                             let tx_claim_rewards = Withdraw::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_claim_rewards.validator.to_string(),
-                                tx.header_hash().to_vec(),
-                            ));     
-
                             data_json = serde_json::to_value(tx_claim_rewards)?;
                         }
                         "tx_deactivate_validator" => {
                             let tx_deactivate_validator = Address::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_deactivate_validator.to_string(),
-                                tx.header_hash().to_vec(),
-                            ));  
-
                             data_json = serde_json::to_value(tx_deactivate_validator)?;
                         }
                         "tx_init_proposal" => {
                             let tx_init_proposal = InitProposalData::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_init_proposal.author.to_string(),
-                                tx.header_hash().to_vec(),
-                            )); 
-
                             data_json = serde_json::to_value(tx_init_proposal)?;
                         }
                         "tx_reactivate_validator" => {
                             let tx_reactivate_validator = Address::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_reactivate_validator.to_string(),
-                                tx.header_hash().to_vec(),
-                            ));
-
                             data_json = serde_json::to_value(tx_reactivate_validator)?;
                         }
                         "tx_unjail_validator" => {
                             let tx_unjail_validator = Address::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_unjail_validator.to_string(),
-                                tx.header_hash().to_vec(),
-                            ));
-
                             data_json = serde_json::to_value(tx_unjail_validator)?;
                         }
                         "tx_redelegate" => {
                             let tx_redelegate = Redelegation::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_redelegate.owner.to_string(),
-                                tx.header_hash().to_vec(),
-                            )); 
-
                             data_json = serde_json::to_value(tx_redelegate)?;
                         }
                         "tx_withdraw" => {
                             let tx_withdraw = Withdraw::try_from_slice(&data[..])?;
-
-                            addresses_tx.push((
-                                tx_withdraw.source.as_ref().unwrap_or(&tx_withdraw.validator).to_string(),
-                                tx.header_hash().to_vec(),
-                            )); 
-
                             data_json = serde_json::to_value(tx_withdraw)?;
                         }
                         _ => {}
@@ -904,9 +801,13 @@ impl Database {
                 gas_limit_multiplier = Some(multiplier as i64);
             }
 
+            dbg!(&signer);
             tx_values.push((
                 hash_id,
                 block_id.to_vec(),
+                block_height,
+                signer.as_ref().map(|s| s.to_string()),
+                tsender.as_ref().map(|s| s.to_string()),
                 utils::tx_type_name(&tx.header.tx_type),
                 txid_wrapper,
                 fee_amount_per_gas_unit,
@@ -918,19 +819,6 @@ impl Database {
                 tx.memo().map(|v| v.to_vec()),
                 return_code,
             ));
-        }
-
-        if !addresses_tx.is_empty() {
-            // should handle error here
-            let _res = address_tx_query_builder
-                .push_values(addresses_tx.into_iter(), |mut b, (address, tx_id)| {
-                    b.push_bind(address).push_bind(tx_id);
-                })
-                .build()
-                .execute(&mut *sqlx_tx)
-                .await
-                .map(|_| ())
-                .map_err(Error::from);
         }
 
         let num_transactions = tx_values.len();
@@ -946,6 +834,9 @@ impl Database {
                  (
                     hash,
                     block_id,
+                    block_height,
+                    signer,
+                    tsender,
                     tx_type,
                     wrapper_id,
                     fee_amount_per_gas_unit,
@@ -959,6 +850,9 @@ impl Database {
                 )| {
                     b.push_bind(hash)
                         .push_bind(block_id)
+                        .push_bind(block_height as i64)
+                        .push_bind(signer)
+                        .push_bind(tsender)
                         .push_bind(tx_type)
                         .push_bind(wrapper_id)
                         .push_bind(fee_amount_per_gas_unit)
@@ -1018,7 +912,6 @@ impl Database {
         )
         .execute(&*self.pool)
         .await?;
-
 
         query(
             format!(

@@ -34,6 +34,9 @@ pub fn get_create_transactions_table_query(network: &str) -> String {
         "CREATE TABLE IF NOT EXISTS {}.transactions (
         hash BYTEA NOT NULL,
         block_id BYTEA NOT NULL,
+        block_height INTEGER,
+        signer TEXT,
+        tsender TEXT,
         tx_type TEXT NOT NULL,
         wrapper_id BYTEA,
         fee_amount_per_gas_unit TEXT,
@@ -71,16 +74,6 @@ pub fn get_create_commit_signatures_table_query(network: &str) -> String {
         validator_address BYTEA NOT NULL,
         timestamp TEXT,
         signature BYTEA NOT NULL
-    );",
-        network
-    )
-}
-
-pub fn get_create_address_tx_table_query(network: &str) -> String {
-    format!(
-        "CREATE TABLE IF NOT EXISTS {}.address_tx (
-        address TEXT,
-        tx_id BYTEA NOT NULL
     );",
         network
     )

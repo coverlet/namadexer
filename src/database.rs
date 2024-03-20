@@ -663,7 +663,7 @@ impl Database {
                             _ => {}
                         }
                     }
-                    info!("Saving {} transaction", type_tx);
+                    // info!("Saving {} transaction", type_tx);
 
                     // decode tx_transfer, tx_bond and tx_unbound to store the decoded data in their tables
                     match type_tx.as_str() {
@@ -887,16 +887,6 @@ impl Database {
                 "
                 ALTER TABLE {}.blocks ADD CONSTRAINT pk_block_id PRIMARY KEY (block_id);
             ",
-                self.network
-            )
-            .as_str(),
-        )
-        .execute(&*self.pool)
-        .await?;
-
-        query(
-            format!(
-                "CREATE INDEX ux_address ON {}.address_tx (address);",
                 self.network
             )
             .as_str(),

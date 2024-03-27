@@ -8,7 +8,6 @@ use namada_sdk::{
     account::{InitAccount, UpdateAccount},
     borsh::BorshDeserialize,
     governance::{InitProposalData, VoteProposalData},
-    tendermint_proto::types::EvidenceList as RawEvidenceList,
     tx::{
         data::{
             pgf::UpdateStewardCommission,
@@ -36,12 +35,13 @@ use std::time::Duration;
 use tendermint::block::Block;
 use tendermint_proto::types::evidence::Sum;
 use tendermint_proto::types::CommitSig;
+use tendermint_proto::types::EvidenceList as RawEvidenceList;
 use tendermint_rpc::endpoint::block_results;
 use tracing::{debug, info, instrument};
 
 use crate::{
     DB_SAVE_BLOCK_COUNTER, DB_SAVE_BLOCK_DURATION, DB_SAVE_COMMIT_SIG_DURATION,
-    DB_SAVE_EVDS_DURATION, DB_SAVE_TXS_DURATION, MASP_ADDR,
+    DB_SAVE_EVDS_DURATION, DB_SAVE_TXS_DURATION, INDEXER_LAST_SAVE_BLOCK_HEIGHT, MASP_ADDR,
 };
 
 use crate::tables::{
@@ -49,8 +49,9 @@ use crate::tables::{
     get_create_commit_signatures_table_query, get_create_evidences_table_query,
     get_create_transactions_table_query,
 };
+use crate::views;
 
-use metrics::{histogram, increment_counter};
+use metrics::{gauge, histogram, increment_counter};
 
 const BLOCKS_TABLE_NAME: &str = "blocks";
 const TX_TABLE_NAME: &str = "transactions";
@@ -62,7 +63,7 @@ const DATABASE_TIMEOUT: u64 = 60;
 pub struct Database {
     pool: Arc<PgPool>,
     // we use the network as the name of the schema to allow diffrent net on the same database
-    network: String,
+    pub network: String,
 }
 
 impl Database {
@@ -142,6 +143,95 @@ impl Database {
             .await?;
 
         query(get_create_evidences_table_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        // And views
+        query(views::get_create_tx_become_validator_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_bond_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_bridge_pool_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_change_consensus_key_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_change_validator_comission_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_change_validator_metadata_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_claim_rewards_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_deactivate_validator_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_ibc_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_init_account_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_init_proposal_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_reactivate_validator_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_redelegate_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_resign_steward_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_reveal_pk_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_transfert_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_unbond_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_unjail_validator_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_update_account_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_update_steward_commission_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_vote_proposal_view_query(&self.network).as_str())
+            .execute(&*self.pool)
+            .await?;
+
+        query(views::get_create_tx_withdraw_view_query(&self.network).as_str())
             .execute(&*self.pool)
             .await?;
 
@@ -305,6 +395,11 @@ impl Database {
         if res.is_ok() {
             // update our counter for processed blocks since service started.
             increment_counter!(DB_SAVE_BLOCK_COUNTER, &labels);
+
+            // update the gauge indicating last block height saved.
+            gauge!(INDEXER_LAST_SAVE_BLOCK_HEIGHT,
+                block.header.height.value() as f64,
+                "chain_name" => self.network.clone());
         }
 
         res
@@ -999,6 +1094,22 @@ impl Database {
         query(&str)
             .bind(hash)
             .fetch_optional(&*self.pool)
+            .await
+            .map_err(Error::from)
+    }
+
+    #[instrument(skip(self))]
+    /// Returns Transaction identified by hash
+    pub async fn get_txs_by_address(&self, address: &String) -> Result<Vec<Row>, Error> {
+        // query for transaction with hash
+        let str = format!(
+            "SELECT * FROM {}.{TX_TABLE_NAME} WHERE data->>'source' = $1 OR data->>'target' = $1;",
+            self.network
+        );
+
+        query(&str)
+            .bind(address)
+            .fetch_all(&*self.pool)
             .await
             .map_err(Error::from)
     }
